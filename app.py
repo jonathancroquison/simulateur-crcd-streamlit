@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🎧 Simulateur CRCD - Prototype initial")
-st.write("Test de la connexion avec l’API Google Gemini, puis lecture vocale de la réponse.")
+st.write("Test de la connexion avec l’API Google Gemini, puis lecture vocale de la réponse (edge-tts et gTTS).")
 
 # --- ÉTAT : DERNIÈRE RÉPONSE IA ---
 if "reponse_ia" not in st.session_state:
@@ -52,54 +52,71 @@ if st.session_state.reponse_ia:
     st.subheader("Dernière réponse générée :")
     st.write(st.session_state.reponse_ia)
 
-# --- FONCTION DE SYNTHÈSE VOCALE ---
-def synthese_vocale(texte: str) -> io.BytesIO:
+# --- FONCTIONS DE SYNTHÈSE VOCALE ---
+
+def synthese_edge(texte: str) -> io.BytesIO:
     """
-    1. Tente d'utiliser edge-tts (voix Neural)
-    2. Si échec, bascule automatiquement sur gTTS
-    Retourne un BytesIO contenant du MP3.
+    Génère un MP3 avec edge-tts (voix neurale Microsoft).
+    Soulève une exception si aucun audio n'est reçu.
     """
-
-    # 1️⃣ Tentative avec edge-tts
-    try:
-        async def _generate_edge(texte_inner: str) -> io.BytesIO:
-            voix = "fr-FR-DeniseNeural"
-            communicate = edge_tts.Communicate(texte_inner, voice=voix)
-            audio_buffer = io.BytesIO()
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_buffer.write(chunk["data"])
-            audio_buffer.seek(0)
-            return audio_buffer
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        audio_fp = loop.run_until_complete(_generate_edge(texte))
-        loop.close()
-
-        # sécurité : si vraiment rien n'a été reçu
-        if audio_fp.getbuffer().nbytes == 0:
-            raise RuntimeError("edge-tts n'a renvoyé aucun audio.")
-
-        return audio_fp
-
-    except Exception:
-        # 2️⃣ Fallback avec gTTS
-        tts = gTTS(text=texte, lang="fr", slow=False)
+    async def _generate_edge(texte_inner: str) -> io.BytesIO:
+        voix = "fr-FR-DeniseNeural"
+        communicate = edge_tts.Communicate(texte_inner, voice=voix)
         audio_buffer = io.BytesIO()
-        tts.write_to_fp(audio_buffer)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_buffer.write(chunk["data"])
         audio_buffer.seek(0)
         return audio_buffer
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        audio_fp = loop.run_until_complete(_generate_edge(texte))
+    finally:
+        loop.close()
+
+    # Si pour une raison quelconque aucun octet n'est reçu :
+    if audio_fp.getbuffer().nbytes == 0:
+        raise RuntimeError("edge-tts n'a renvoyé aucun audio.")
+    return audio_fp
+
+
+def synthese_gtts(texte: str) -> io.BytesIO:
+    """
+    Génère un MP3 avec gTTS (fallback fiable).
+    """
+    tts = gTTS(text=texte, lang="fr", slow=False)
+    audio_buffer = io.BytesIO()
+    tts.write_to_fp(audio_buffer)
+    audio_buffer.seek(0)
+    return audio_buffer
 
 # --- BLOC UI : LECTURE AUDIO ---
 st.subheader("🔊 Lecture audio de la réponse")
 
-if st.button("Lire la réponse à voix haute"):
-    if not st.session_state.reponse_ia:
-        st.warning("⚠️ Vous devez d’abord envoyer une question et obtenir une réponse.")
-    else:
-        try:
-            audio_fp = synthese_vocale(st.session_state.reponse_ia)
-            st.audio(audio_fp, format="audio/mp3")
-        except Exception as e:
-            st.error(f"Erreur audio : {e}")
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("Voix neurale (edge-tts)"):
+        if not st.session_state.reponse_ia:
+            st.warning("⚠️ Vous devez d’abord envoyer une question et obtenir une réponse.")
+        else:
+            try:
+                audio_fp = synthese_edge(st.session_state.reponse_ia)
+                st.audio(audio_fp, format="audio/mp3")
+            except Exception as e:
+                st.error("Erreur edge-tts :")
+                st.code(repr(e))
+
+with col2:
+    if st.button("Voix standard (gTTS)"):
+        if not st.session_state.reponse_ia:
+            st.warning("⚠️ Vous devez d’abord envoyer une question et obtenir une réponse.")
+        else:
+            try:
+                audio_fp = synthese_gtts(st.session_state.reponse_ia)
+                st.audio(audio_fp, format="audio/mp3")
+            except Exception as e:
+                st.error("Erreur gTTS :")
+                st.code(repr(e))
