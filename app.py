@@ -5,6 +5,7 @@ import asyncio
 import streamlit as st
 import google.generativeai as genai
 import edge_tts
+from gtts import gTTS
 
 # --- CONFIG GEMINI ---
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -19,9 +20,9 @@ st.set_page_config(
 )
 
 st.title("🎧 Simulateur CRCD - Prototype initial")
-st.write("Testons la connexion avec l’API Google Gemini, puis lisons la réponse à voix haute.")
+st.write("Test de la connexion avec l’API Google Gemini, puis lecture vocale de la réponse.")
 
-# --- ÉTAT POUR STOCKER LA RÉPONSE IA ---
+# --- ÉTAT : DERNIÈRE RÉPONSE IA ---
 if "reponse_ia" not in st.session_state:
     st.session_state.reponse_ia = None
 
@@ -38,7 +39,7 @@ if st.button("Envoyer"):
             reponse = model.generate_content(question)
             texte_reponse = reponse.text
 
-            st.session_state.reponse_ia = texte_reponse  # on mémorise pour la synthèse vocale
+            st.session_state.reponse_ia = texte_reponse
 
             st.subheader("Réponse de l’IA :")
             st.write(texte_reponse)
@@ -46,33 +47,52 @@ if st.button("Envoyer"):
         except Exception as e:
             st.error(f"Erreur lors de l’appel à l’API : {e}")
 
-
-# --- AFFICHAGE DE LA DERNIÈRE RÉPONSE (SI PRESENTE) ---
+# --- AFFICHER LA DERNIÈRE RÉPONSE ---
 if st.session_state.reponse_ia:
     st.subheader("Dernière réponse générée :")
     st.write(st.session_state.reponse_ia)
 
-
-# --- SYNTHÈSE VOCALE AVEC EDGE-TTS ---
-st.subheader("🔊 Lecture audio de la réponse")
-
+# --- FONCTION DE SYNTHÈSE VOCALE ---
 def synthese_vocale(texte: str) -> io.BytesIO:
-    """Génère un flux audio MP3 à partir d'un texte avec edge-tts."""
-    async def _generate(texte_inner: str) -> io.BytesIO:
-        voix = "fr-FR-DeniseNeural"
-        communicate = edge_tts.Communicate(texte_inner, voice=voix)
+    """
+    1. Tente d'utiliser edge-tts (voix Neural)
+    2. Si échec, bascule automatiquement sur gTTS
+    Retourne un BytesIO contenant du MP3.
+    """
+
+    # 1️⃣ Tentative avec edge-tts
+    try:
+        async def _generate_edge(texte_inner: str) -> io.BytesIO:
+            voix = "fr-FR-DeniseNeural"
+            communicate = edge_tts.Communicate(texte_inner, voice=voix)
+            audio_buffer = io.BytesIO()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_buffer.write(chunk["data"])
+            audio_buffer.seek(0)
+            return audio_buffer
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        audio_fp = loop.run_until_complete(_generate_edge(texte))
+        loop.close()
+
+        # sécurité : si vraiment rien n'a été reçu
+        if audio_fp.getbuffer().nbytes == 0:
+            raise RuntimeError("edge-tts n'a renvoyé aucun audio.")
+
+        return audio_fp
+
+    except Exception:
+        # 2️⃣ Fallback avec gTTS
+        tts = gTTS(text=texte, lang="fr", slow=False)
         audio_buffer = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_buffer.write(chunk["data"])
+        tts.write_to_fp(audio_buffer)
         audio_buffer.seek(0)
         return audio_buffer
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    audio_fp = loop.run_until_complete(_generate(texte))
-    loop.close()
-    return audio_fp
+# --- BLOC UI : LECTURE AUDIO ---
+st.subheader("🔊 Lecture audio de la réponse")
 
 if st.button("Lire la réponse à voix haute"):
     if not st.session_state.reponse_ia:
